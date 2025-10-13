@@ -51,133 +51,299 @@ df_persons <- fread(f_pers)
 Strukturdaten <- read_parquet(file.path(dir_struct, "Strukturgroessen.parquet"))
 npvm_zones_ZH <- read_sf(f_npvm)
 
-'
-na_summary <- sort(colSums(is.na(df_to_TEST)), decreasing = TRUE)
-na_summary[na_summary > 0]   # show only columns that have at least one NA
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- 
+### Step 2: Keep relevant columns and build a compact join
+# Trip records (keep household id + main purpose so we can still filter on it later).
+trip_cols_relevant <- c("HHNR", "wzweck1")
+
+df_tripsCH_reduced <- df_tripsCH %>%
+  dplyr::select(dplyr::any_of(trip_cols_relevant)) %>%
+  standardise_hh_id() %>%
+  dplyr::relocate(hh_id)
+
+# Person-level descriptors requested by the user.
+person_cols_relevant <- c(
+  "HHNR",                   # alternative household identifier name
+  "WP",                  # person weight
+  "alter",                  # age
+  "gesl",               # gender
+  "f40800_01",           # employment status
+  "f40120",            # highest education
+  "f42100e", # car availability
+  "f41600_01a",    # GA subscription
+  "f41600_01b",  # half-fare subscription
+  "f41600_01c",  # zone subscription
+  "f41600_01d", # route subscription
+  "f41600_01e", # seven25/track7 subscription
+  "f41600_01f",         # junior/child subscription
+  "f41600_01g"          # other subscription types
+)
+
+df_persons_reduced <- df_persons %>%
+  dplyr::select(dplyr::any_of(person_cols_relevant)) %>%
+  standardise_hh_id() %>%
+  dplyr::relocate(hh_id)
+
+# Household-level information limited to the requested income attribute.
+household_cols_relevant <- c("HHNR", "f20601")
+
+df_hh_reduced <- df_hh %>%
+  dplyr::select(dplyr::any_of(household_cols_relevant)) %>%
+  standardise_hh_id() %>%
+  dplyr::relocate(hh_id)
+
+# Join the trimmed tables on the harmonised household identifier to produce a
+# compact analysis-ready file and export it for reuse.
+df_trips_persons_hh <- df_tripsCH_reduced %>%
+  left_join(df_persons_reduced, by = "hh_id") %>%
+  left_join(df_hh_reduced, by = "hh_id")
+
+write_csv(
+  df_trips_persons_hh,
+  file.path(dir_tables, "df_combined_reduced.csv")
+)
 
 # ------------------------------------------------------------------------------------------------------------------
-### Export attribute tables
+# Step 3: Data cleaning
+# Merge all person and trip-level data first
 
-# Create attribute data frames
-df_tripsCH_attributes      <- data.frame(names(df_tripsCH))
-df_hh_attributes           <- data.frame(names(df_hh))
-df_persons_attributes      <- data.frame(names(df_persons))
-Strukturdaten_attributes   <- data.frame(names(Strukturdaten))
-npvm_zones_ZH_attributes   <- data.frame(names(npvm_zones_ZH))
-
-dir_export <- file.path(dir_out, "attributes")
-dir.create(dir_export, showWarnings = FALSE)
-
-# Write to CSV
-write.csv(df_tripsCH_attributes,    file.path(dir_export, "df_tripsCH_attributes.csv"),    row.names = FALSE)
-write.csv(df_hh_attributes,         file.path(dir_export, "df_hh_attributes.csv"),         row.names = FALSE)
-write.csv(df_persons_attributes,    file.path(dir_export, "df_persons_attributes.csv"),    row.names = FALSE)
-write.csv(Strukturdaten_attributes,file.path(dir_export, "Strukturdaten_attributes.csv"), row.names = FALSE)
-write.csv(npvm_zones_ZH_attributes,file.path(dir_export, "npvm_zones_ZH_attributes.csv"), row.names = FALSE)
-'
-# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- 
-### Step 2: Combine Data
-
-## Combine
-#df_zp_hh <- full_join(df_hh, df_persons)
-#df_zp_hh_attributes <- data.frame(names(df_zp_hh))
-
-## trips by household & purpose
-df_n_trips_hh_all <- df_tripsCH %>%
-  filter(wzweck1 > 0) %>%
-  group_by(HHNR, wzweck1) %>%
-  summarise(n_trips = n(), .groups = "drop")
-
-## house hold attributes
-hh_attributes <- df_persons %>%
-  group_by(HHNR) %>%
-  summarise(
-    # age composition (adjust age column name if different)
-    n_age_0_17  = sum(alter <= 17, na.rm = TRUE),
-    n_age_18_24 = sum(alter >= 18 & alter <= 24, na.rm = TRUE),
-    n_age_25_44 = sum(alter >= 25 & alter <= 44, na.rm = TRUE),
-    n_age_45_64 = sum(alter >= 45 & alter <= 64, na.rm = TRUE),
-    n_age_65_74 = sum(alter >= 65 & alter <= 74, na.rm = TRUE),
-    n_age_75p   = sum(alter >= 75, na.rm = TRUE),
-    
-    
-    hh_car_avail  = as.integer(any(f42100e %in% c(1,2), na.rm = TRUE)), # household car availability: any person indicates car availability
-    hh_pt_avail   = as.integer(any(dplyr::if_any(f41600_01a:f41600_01g, ~ .x == 1), na.rm = TRUE)), # household PT subscription: any person has an abo in any of these cols
-    hh_employed = as.integer(any(f40800_01 %in% c(1,2,3,4,5), na.rm = TRUE)) # employment
-  )
-
-hh_size_from_hh <- df_hh %>%
-  transmute(HHNR, hh_size = hhgr)
-
-## Base HH table (one row per household) + predictors
-df_hh_base <- df_hh %>%
-  left_join(hh_attributes, by = "HHNR") %>%
-  left_join(hh_size_from_hh, by = "HHNR") %>%
+# Clean and transform variables
+df_cleaned <- df_trips_persons_hh %>%
   mutate(
-    car_group = factor(if_else(hh_car_avail == 1, "CAR", "NO_CAR"), levels = c("NO_CAR","CAR")),
-    pt_group  = factor(if_else(hh_pt_avail  == 1, "PT",  "NO_PT"), levels = c("NO_PT","PT"))
+    # Age groups (binary flags)
+    n_age_0_17  = as.integer(alter <= 17),
+    n_age_18_24 = as.integer(alter >= 18 & alter <= 24),
+    n_age_25_44 = as.integer(alter >= 25 & alter <= 44),
+    n_age_45_64 = as.integer(alter >= 45 & alter <= 64),
+    n_age_65_74 = as.integer(alter >= 65 & alter <= 74),
+    n_age_75p   = as.integer(alter >= 75),
+    
+    # Gender recode
+    gesl = case_when(
+      gesl == 1 ~ "male",
+      gesl == 2 ~ "female",
+      TRUE ~ NA_character_
+    ),
+    
+    # Employment recode
+    employment = case_when(
+      f40800_01 %in% c(1, 2, 3, 9) ~ "employed",
+      f40800_01 == 4 ~ "unemployed",
+      TRUE ~ NA_character_
+    ),
+    
+    # Trip purpose recode
+    purpose = case_when(
+      wzweck1 %in% c(2, 6) ~ "Work",
+      wzweck1 == 3 ~ "Education",
+      wzweck1 %in% c(8, 11, 12, 13) ~ "Leisure",
+      wzweck1 == 4 ~ "Shop",
+      wzweck1 %in% c(5, 7) ~ "Errands",
+      TRUE ~ NA_character_
+    ),
+    
+    # Car availability recode
+    car_avail = case_when(
+      f42100e %in% c(1, 2) ~ "Available",
+      f42100e == 3 ~ "Unavailable",
+      TRUE ~ NA_character_
+    ),
+    
+    # PT availability from subscriptions
+    pt_available = if_else(
+      rowSums(across(dplyr::starts_with("f41600_01"), ~ .x == 1), na.rm = TRUE) > 0,
+      "Available", "Unavailable"
+    ),
+    
+    # Household income group
+    income_group = case_when(
+      f20601 == 1 ~ "Under CHF 2000",
+      f20601 == 2 ~ "CHF 2000 to 4000",
+      f20601 == 3 ~ "CHF 4001 to 6000",
+      f20601 == 4 ~ "CHF 6001 to 8000",
+      f20601 == 5 ~ "CHF 8001 to 10000",
+      f20601 == 6 ~ "CHF 10001 to 12000",
+      f20601 == 7 ~ "CHF 12001 to 14000",
+      f20601 == 8 ~ "CHF 14001 to 16000",
+      f20601 == 9 ~ "More than CHF 16000",
+      TRUE ~ NA_character_
+    )
   )
 
-## checks & cleanup
-stopifnot(all(c("HHNR","car_group","pt_group","hh_size") %in% names(df_hh_base)))
-table(df_hh_base$car_group, useNA="ifany")
-table(df_hh_base$pt_group,  useNA="ifany")
+# Drop PT subscription detail columns
+df_cleaned <- df_cleaned %>%
+  dplyr::select(-dplyr::starts_with("f41600_01"))
 
-rm(hh_size_from_hh)
-rm(hh_attributes)
+# Drop raw columns already recoded
+df_cleaned <- df_cleaned %>%
+  dplyr::select(-dplyr::any_of(c("f40800_01", "f40120", "f42100e", "f20601")))
+
+# ---- Drop rows with missing values
+n_before_na <- nrow(df_cleaned)
+df_cleaned <- df_cleaned %>% drop_na()
+n_after_na <- nrow(df_cleaned)
+cat("🚫 Dropped due to NA values: ", n_before_na - n_after_na, "\n")
+
+# ---- Drop rows with invalid or unmapped trip purposes
+n_before_purpose <- nrow(df_cleaned)
+df_cleaned <- df_cleaned %>% filter(!is.na(purpose))
+n_after_purpose <- nrow(df_cleaned)
+cat("🚫 Dropped due to invalid/missing trip purpose: ", 
+    n_before_purpose - n_after_purpose, "\n")
+
+# ---- Plot: Weighted total trips by purpose
+trip_summary <- df_cleaned %>%
+  group_by(purpose) %>%
+  summarise(total_trips = sum(WP, na.rm = TRUE)) %>%
+  arrange(desc(total_trips))
+
+# Create plot
+trip_plot <- ggplot(trip_summary, aes(x = reorder(purpose, -total_trips), y = total_trips)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Total Trips by Purpose (Weighted)",
+    x = "Trip Purpose",
+    y = "Weighted Trip Count"
+  ) +
+  theme_minimal()
+
+# Print and save plot
+print(trip_plot)
+ggsave(
+  filename = file.path(dir_figures, "trips_by_purpose_weighted.png"),
+  plot = trip_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ---- Final row count
+cat("✅ Final number of rows in cleaned dataset: ", nrow(df_cleaned), "\n")
+
+write_csv(df_cleaned, file.path(dir_tables, "df_cleaned_combined.csv"))
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-### Step 3: Clean up & remove NAs
+### Step 4: Prepare Work Trip Model Input ----
 
-## clean up attributes
-predictor_cols <- c("n_age_0_17","n_age_18_24","n_age_25_44","n_age_45_64","n_age_65_74","n_age_75p",
-                    "hh_car_avail","hh_pt_avail","hh_employed","hh_size","car_group","pt_group")
+# Filter and count number of work trips per household
+df_work_counts <- df_cleaned %>%
+  filter(purpose == "Work") %>%
+  group_by(hh_id) %>%
+  summarise(n_trips_work = n(), .groups = "drop")
 
-df_hh_clean <- df_hh_base %>% drop_na(all_of(predictor_cols))
+# Merge work trip counts with full cleaned data (preserving categories)
+df_plot_data <- df_work_counts %>%
+  left_join(df_cleaned, by = "hh_id")
 
-# Households that appear in trips at all (any record)
-hh_any_trip <- df_tripsCH %>%
-  distinct(HHNR)
+# Save full table with all attributes but only work trips
+write_csv(df_plot_data, file.path(dir_tables, "df_cleaned_worktrips.csv"))
 
-# Households with at least one valid purpose (>0)
-hh_with_valid_purpose <- df_tripsCH %>%
-  filter(!is.na(wzweck1) & wzweck1 > 0) %>%
-  distinct(HHNR)
+# --- PLOTS ---
 
-# Households whose trips exist but have NO valid purpose (only NA/invalid)
-hh_only_na <- hh_any_trip %>% 
-  anti_join(hh_with_valid_purpose, by = "HHNR")
+# 1. Work trips by car availability
+p_car <- df_plot_data %>%
+  group_by(car_avail) %>%
+  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  ggplot(aes(x = car_avail, y = total_work_trips, fill = car_avail)) +
+  geom_col() +
+  labs(title = "Total Work Trips by Car Availability", x = "Car Availability", y = "Work Trips") +
+  theme_minimal() +
+  theme(legend.position = "none")
 
-# Drop ONLY those
-n_before <- nrow(df_hh_clean)
-df_hh_clean <- df_hh_clean %>%
-  anti_join(hh_only_na, by = "HHNR")
-n_after <- nrow(df_hh_clean)
+# 2. Work trips by PT availability
+p_pt <- df_plot_data %>%
+  group_by(pt_available) %>%
+  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  ggplot(aes(x = pt_available, y = total_work_trips, fill = pt_available)) +
+  geom_col() +
+  labs(title = "Total Work Trips by PT Availability", x = "PT Availability", y = "Work Trips") +
+  theme_minimal() +
+  theme(legend.position = "none")
 
-message("Households kept after NA drop: ", n_after," (dropped: ", n_before - n_after, ")")
-rm(n_before,n_after,hh_only_na,hh_with_valid_purpose,hh_any_trip)
+# 3. Work trips by employment status
+p_emp <- df_plot_data %>%
+  group_by(employment) %>%
+  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  ggplot(aes(x = employment, y = total_work_trips, fill = employment)) +
+  geom_col() +
+  labs(title = "Total Work Trips by Employment Status", x = "Employment", y = "Work Trips") +
+  theme_minimal() +
+  theme(legend.position = "none")
 
+# 4. Work trips by income group
+p_income <- df_plot_data %>%
+  group_by(income_group) %>%
+  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(income_group, total_work_trips), y = total_work_trips, fill = income_group)) +
+  geom_col() +
+  labs(title = "Total Work Trips by Income Group", x = "Income Group", y = "Work Trips") +
+  coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "none")
 
-na_counts <- df_hh_base %>%
-  summarise(across(all_of(predictor_cols), ~sum(is.na(.))))
-print(na_counts)
-rm(na_counts)
+# 5. Work trips by gender
+p_gender <- df_plot_data %>%
+  group_by(gesl) %>%
+  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  ggplot(aes(x = gesl, y = total_work_trips, fill = gesl)) +
+  geom_col() +
+  labs(title = "Total Work Trips by Gender", x = "Gender", y = "Work Trips") +
+  theme_minimal() +
+  theme(legend.position = "none")
 
+# 6. Work trips by age group
+df_age_long <- df_plot_data %>%
+  pivot_longer(
+    cols = starts_with("n_age_"),
+    names_to = "age_group",
+    values_to = "is_in_group"
+  ) %>%
+  filter(is_in_group == 1)  # Keep only relevant age groups
 
-# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-### Step 4: filter for work
+# Optional: Rename age group labels for readability
+df_age_long <- df_age_long %>%
+  mutate(age_group = recode(age_group,
+                            "n_age_0_17" = "0–17",
+                            "n_age_18_24" = "18–24",
+                            "n_age_25_44" = "25–44",
+                            "n_age_45_64" = "45–64",
+                            "n_age_65_74" = "65–74",
+                            "n_age_75p"   = "75+"
+  ))
 
-work_codes <- c(2L,6L)
-table(df_n_trips_hh_all$wzweck1)
+p_age <- df_age_long %>%
+  group_by(age_group) %>%
+  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  ggplot(aes(x = age_group, y = total_work_trips, fill = age_group)) +
+  geom_col() +
+  labs(title = "Total Work Trips by Age Group", x = "Age Group", y = "Work Trips") +
+  theme_minimal() +
+  theme(legend.position = "none")
 
-df_work_counts <- df_n_trips_hh_all %>%
-  filter(wzweck1 %in% work_codes) %>%
-  group_by(HHNR) %>%
-  summarise(n_trips_work = sum(n_trips), .groups = "drop")
+# ---- Display the plots
+print(p_car)
+print(p_pt)
+print(p_emp)
+print(p_income)
+print(p_gender)
+print(p_age)
 
-df_work <- df_hh_clean %>%
-  left_join(df_work_counts, by = "HHNR") %>%
-  mutate(n_work = coalesce(n_trips_work, 0L)) ##
+# ---- Save all plots to disk
+ggsave(file.path(dir_figures, "work_trips_by_car.png"), plot = p_car, width = 6, height = 4, dpi = 300)
+ggsave(file.path(dir_figures, "work_trips_by_pt.png"), plot = p_pt, width = 6, height = 4, dpi = 300)
+ggsave(file.path(dir_figures, "work_trips_by_employment.png"), plot = p_emp, width = 6, height = 4, dpi = 300)
+ggsave(file.path(dir_figures, "work_trips_by_income.png"), plot = p_income, width = 7, height = 5, dpi = 300)
+ggsave(file.path(dir_figures, "work_trips_by_gender.png"), plot = p_gender, width = 6, height = 4, dpi = 300)
+ggsave(file.path(dir_figures, "work_trips_by_age.png"), plot = p_age, width = 6, height = 4, dpi = 300)
+
+# ---- Print total weighted work trips
+
+total_weighted_work_trips <- df_cleaned %>%
+  filter(purpose == "Work") %>%
+  summarise(total = sum(WP, na.rm = TRUE)) %>%
+  pull(total)
+
+cat("✅ Total weighted work trips:", round(total_weighted_work_trips), "\n")
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ### Step 5: Model Choice
