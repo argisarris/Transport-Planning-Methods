@@ -225,80 +225,84 @@ write_csv(df_cleaned, file.path(dir_tables, "df_cleaned_combined.csv"))
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ### Step 4: Prepare Work Trip Model Input ----
 
-# Filter and count number of work trips per household
-df_work_counts <- df_cleaned %>%
-  filter(purpose == "Work") %>%
-  group_by(hh_id) %>%
-  summarise(n_trips_work = n(), .groups = "drop")
+# Filter to keep only work trips for subsequent analysis
+df_work_trips <- df_cleaned %>%
+  filter(purpose == "Work")
 
-# Merge work trip counts with full cleaned data (preserving categories)
-df_plot_data <- df_work_counts %>%
-  left_join(df_cleaned, by = "hh_id")
+# Count number of work trips per household (both raw and weighted)
+df_work_counts <- df_work_trips %>%
+  group_by(hh_id) %>%
+  summarise(
+    n_trips_work = n(),
+    weighted_trips = sum(WP, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Attach the household-level counts back to the work-trip table for convenience
+df_work_trips <- df_work_trips %>%
+  left_join(df_work_counts, by = "hh_id")
 
 # Save full table with all attributes but only work trips
-write_csv(df_plot_data, file.path(dir_tables, "df_cleaned_worktrips.csv"))
+write_csv(df_work_trips, file.path(dir_tables, "df_cleaned_worktrips.csv"))
 
 # --- PLOTS ---
 
+# Helper to compute weighted totals safely
+sum_work_trips <- function(data, grouping_var) {
+  data %>%
+    group_by({{ grouping_var }}) %>%
+    summarise(total_work_trips = sum(WP, na.rm = TRUE), .groups = "drop")
+}
+
 # 1. Work trips by car availability
-p_car <- df_plot_data %>%
-  group_by(car_avail) %>%
-  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+p_car <- sum_work_trips(df_work_trips, car_avail) %>%
   ggplot(aes(x = car_avail, y = total_work_trips, fill = car_avail)) +
   geom_col() +
-  labs(title = "Total Work Trips by Car Availability", x = "Car Availability", y = "Work Trips") +
+  labs(title = "Total Work Trips by Car Availability", x = "Car Availability", y = "Weighted Work Trips") +
   theme_minimal() +
   theme(legend.position = "none")
 
 # 2. Work trips by PT availability
-p_pt <- df_plot_data %>%
-  group_by(pt_available) %>%
-  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+p_pt <- sum_work_trips(df_work_trips, pt_available) %>%
   ggplot(aes(x = pt_available, y = total_work_trips, fill = pt_available)) +
   geom_col() +
-  labs(title = "Total Work Trips by PT Availability", x = "PT Availability", y = "Work Trips") +
+  labs(title = "Total Work Trips by PT Availability", x = "PT Availability", y = "Weighted Work Trips") +
   theme_minimal() +
   theme(legend.position = "none")
 
 # 3. Work trips by employment status
-p_emp <- df_plot_data %>%
-  group_by(employment) %>%
-  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+p_emp <- sum_work_trips(df_work_trips, employment) %>%
   ggplot(aes(x = employment, y = total_work_trips, fill = employment)) +
   geom_col() +
-  labs(title = "Total Work Trips by Employment Status", x = "Employment", y = "Work Trips") +
+  labs(title = "Total Work Trips by Employment Status", x = "Employment", y = "Weighted Work Trips") +
   theme_minimal() +
   theme(legend.position = "none")
 
 # 4. Work trips by income group
-p_income <- df_plot_data %>%
-  group_by(income_group) %>%
-  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+p_income <- sum_work_trips(df_work_trips, income_group) %>%
   ggplot(aes(x = reorder(income_group, total_work_trips), y = total_work_trips, fill = income_group)) +
   geom_col() +
-  labs(title = "Total Work Trips by Income Group", x = "Income Group", y = "Work Trips") +
+  labs(title = "Total Work Trips by Income Group", x = "Income Group", y = "Weighted Work Trips") +
   coord_flip() +
   theme_minimal() +
   theme(legend.position = "none")
 
 # 5. Work trips by gender
-p_gender <- df_plot_data %>%
-  group_by(gesl) %>%
-  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+p_gender <- sum_work_trips(df_work_trips, gesl) %>%
   ggplot(aes(x = gesl, y = total_work_trips, fill = gesl)) +
   geom_col() +
-  labs(title = "Total Work Trips by Gender", x = "Gender", y = "Work Trips") +
+  labs(title = "Total Work Trips by Gender", x = "Gender", y = "Weighted Work Trips") +
   theme_minimal() +
   theme(legend.position = "none")
 
 # 6. Work trips by age group
-df_age_long <- df_plot_data %>%
+df_age_long <- df_work_trips %>%
   pivot_longer(
     cols = starts_with("n_age_"),
     names_to = "age_group",
     values_to = "is_in_group"
   ) %>%
-  filter(is_in_group == 1)  # Keep only relevant age groups
+  filter(is_in_group == 1)
 
 # Optional: Rename age group labels for readability
 df_age_long <- df_age_long %>%
@@ -313,10 +317,10 @@ df_age_long <- df_age_long %>%
 
 p_age <- df_age_long %>%
   group_by(age_group) %>%
-  summarise(total_work_trips = sum(n_trips_work, na.rm = TRUE)) %>%
+  summarise(total_work_trips = sum(WP, na.rm = TRUE), .groups = "drop") %>%
   ggplot(aes(x = age_group, y = total_work_trips, fill = age_group)) +
   geom_col() +
-  labs(title = "Total Work Trips by Age Group", x = "Age Group", y = "Work Trips") +
+  labs(title = "Total Work Trips by Age Group", x = "Age Group", y = "Weighted Work Trips") +
   theme_minimal() +
   theme(legend.position = "none")
 
@@ -338,89 +342,204 @@ ggsave(file.path(dir_figures, "work_trips_by_age.png"), plot = p_age, width = 6,
 
 # ---- Print total weighted work trips
 
-total_weighted_work_trips <- df_cleaned %>%
-  filter(purpose == "Work") %>%
+total_weighted_work_trips <- df_work_trips %>%
   summarise(total = sum(WP, na.rm = TRUE)) %>%
   pull(total)
 
 cat("✅ Total weighted work trips:", round(total_weighted_work_trips), "\n")
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-### Step 5: Model Choice
+### Step 5: Estimate Work Trip Models
 
-summary(df_work$n_work)
-mc_mean_n <- mean(df_work$n_work); mc_var_n <- var(df_work$n_work) #mc = model check
-message("mean=", round(mc_mean_n,3), " var=", round(mc_var_n,3), 
-        " (", ifelse(mc_var_n > 1.5*mc_mean_n, "use NegBin", "Poisson ok"), ")")
+# ---- Assemble household-level predictors
 
+subscription_cols <- grep("^f41600_01", names(df_persons_reduced), value = TRUE)
 
-## more complicated
+df_persons_features <- df_persons_reduced %>%
+  mutate(
+    car_flag_person = case_when(
+      f42100e %in% c(1, 2) ~ 1L,
+      f42100e == 3 ~ 0L,
+      TRUE ~ NA_integer_
+    )
+  )
 
-mc_form <- n_work ~ n_age_0_17 + n_age_18_24 + n_age_25_44 +
-  n_age_45_64 + n_age_65_74 + n_age_75p +
-  car_group + pt_group
+if (length(subscription_cols) > 0) {
+  df_persons_features <- df_persons_features %>%
+    mutate(
+      pt_flag_person = as.integer(
+        rowSums(dplyr::select(., all_of(subscription_cols)) == 1, na.rm = TRUE) > 0
+      )
+    )
+} else {
+  df_persons_features <- df_persons_features %>%
+    mutate(pt_flag_person = NA_integer_)
+}
 
-# Fit Poisson and check overdispersion
-mc_m_pois <- glm(mc_form, family = poisson(), data = df_work)
+df_household_predictors <- df_persons_features %>%
+  group_by(hh_id) %>%
+  summarise(
+    hh_size = dplyr::n(),
+    n_age_0_17 = sum(alter <= 17, na.rm = TRUE),
+    n_age_18_24 = sum(alter >= 18 & alter <= 24, na.rm = TRUE),
+    n_age_25_44 = sum(alter >= 25 & alter <= 44, na.rm = TRUE),
+    n_age_45_64 = sum(alter >= 45 & alter <= 64, na.rm = TRUE),
+    n_age_65_74 = sum(alter >= 65 & alter <= 74, na.rm = TRUE),
+    n_age_75p = sum(alter >= 75, na.rm = TRUE),
+    n_female = sum(gesl == 2, na.rm = TRUE),
+    n_employed = sum(f40800_01 %in% c(1, 2, 3, 9), na.rm = TRUE),
+    car_flag = {
+      hh_car <- car_flag_person
+      if (all(is.na(hh_car))) NA_integer_
+      else if (any(hh_car == 1, na.rm = TRUE)) 1L
+      else 0L
+    },
+    pt_flag = {
+      hh_pt <- pt_flag_person
+      if (all(is.na(hh_pt))) NA_integer_
+      else if (any(hh_pt == 1, na.rm = TRUE)) 1L
+      else 0L
+    },
+    .groups = "drop"
+  )
 
-mc_pearson_od <- sum(residuals(mc_m_pois, type = "pearson")^2) / df.residual(mc_m_pois)
-
-cat("Mean =", round(mc_mean_n,3), " Var =", round(mc_var_n,3), "\n")
-cat("Poisson Pearson overdispersion =", round(mc_pearson_od, 2), "\n")
-
-# Fit Negative Binomial
-mc_m_nb <- glm.nb(mc_form, data = df_work)
-mc_theta <- mc_m_nb$theta
-cat("NB theta =", round(mc_theta,3), "(higher ~ closer to Poisson; lower ~ more overdispersion)\n")
-
-# Compare fit (LogLik & AIC)
-mc_comp <- data.frame(
-  model = c("Poisson","NegBin"),
-  logLik = c(logLik(mc_m_pois), logLik(mc_m_nb)),
-  AIC    = c(AIC(mc_m_pois),    AIC(mc_m_nb))
+income_levels <- c(
+  "Under CHF 2000",
+  "CHF 2000 to 4000",
+  "CHF 4001 to 6000",
+  "CHF 6001 to 8000",
+  "CHF 8001 to 10000",
+  "CHF 10001 to 12000",
+  "CHF 12001 to 14000",
+  "CHF 14001 to 16000",
+  "More than CHF 16000"
 )
-print(mc_comp[order(mc_comp$AIC), ], row.names = FALSE)
 
-# Likelihood-ratio comparison
-anova(mc_m_pois, mc_m_nb, test = "Chisq")
+df_income_lookup <- df_hh_reduced %>%
+  mutate(
+    income_group = case_when(
+      f20601 == 1 ~ income_levels[1],
+      f20601 == 2 ~ income_levels[2],
+      f20601 == 3 ~ income_levels[3],
+      f20601 == 4 ~ income_levels[4],
+      f20601 == 5 ~ income_levels[5],
+      f20601 == 6 ~ income_levels[6],
+      f20601 == 7 ~ income_levels[7],
+      f20601 == 8 ~ income_levels[8],
+      f20601 == 9 ~ income_levels[9],
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  dplyr::select(hh_id, income_group)
 
-# Parsimony checks (ANOVA)
-anova(mc_m_nb, test = "Chisq")
+df_work_model_input <- df_household_predictors %>%
+  left_join(df_income_lookup, by = "hh_id") %>%
+  left_join(df_work_counts %>% dplyr::select(hh_id, n_trips_work), by = "hh_id") %>%
+  mutate(
+    n_work = coalesce(n_trips_work, 0L),
+    car_group = factor(if_else(car_flag == 1, "Available", "Unavailable"),
+                       levels = c("Unavailable", "Available")),
+    pt_group = factor(if_else(pt_flag == 1, "Available", "Unavailable"),
+                      levels = c("Unavailable", "Available")),
+    income_group = factor(income_group, levels = income_levels, ordered = TRUE),
+    female_share = if_else(hh_size > 0, n_female / hh_size, NA_real_),
+    employed_share = if_else(hh_size > 0, n_employed / hh_size, NA_real_)
+  ) %>%
+  dplyr::select(
+    hh_id,
+    n_work,
+    hh_size,
+    n_age_0_17,
+    n_age_18_24,
+    n_age_25_44,
+    n_age_45_64,
+    n_age_65_74,
+    n_age_75p,
+    car_group,
+    pt_group,
+    female_share,
+    employed_share,
+    income_group
+  ) %>%
+  drop_na()
 
-# Coefficients as IRRs (incident rate ratios)
-irr <- broom::tidy(mc_m_nb, exponentiate = TRUE, conf.int = TRUE)
-print(irr[, c("term","estimate","conf.low","conf.high","p.value")])
+cat("✅ Households available for modelling:", nrow(df_work_model_input), "\n")
 
-### Save model objects
-saveRDS(mc_m_pois, file = file.path(dir_models, "model_poisson.rds"))
-saveRDS(mc_m_nb,   file = file.path(dir_models, "model_negbin.rds"))
+write_csv(df_work_model_input, file.path(dir_tables, "df_work_model_input.csv"))
 
-### Save IRRs as CSV
-write.csv(irr[, c("term","estimate","conf.low","conf.high","p.value")],
-          file = file.path(dir_models, "nb_model_IRRs.csv"), row.names = FALSE)
+# ---- Define model specifications
 
-### Save model comparison table
-write.csv(mc_comp, file = file.path(dir_models, "model_comparison.csv"), row.names = FALSE)
-
-### Save work trip data used for model estimation
-write.csv(df_work, file = file.path(dir_tables, "df_work_model_input.csv"), row.names = FALSE)
-
-### Save cleaned household data for future use or validation
-write.csv(df_hh_clean, file = file.path(dir_models, "df_hh_clean.csv"), row.names = FALSE)
-
-### Save Poisson overdispersion test
-overdisp_stats <- data.frame(
-  model = "Poisson",
-  mean_trips = mc_mean_n,
-  var_trips = mc_var_n,
-  pearson_overdispersion = mc_pearson_od
+model_specs <- list(
+  basic = list(
+    description = "Age + car/PT availability",
+    formula = n_work ~ n_age_0_17 + n_age_18_24 + n_age_25_44 + n_age_45_64 +
+      n_age_65_74 + n_age_75p + car_group + pt_group
+  ),
+  full = list(
+    description = "Age + car/PT availability + gender, employment, income, household size",
+    formula = n_work ~ n_age_0_17 + n_age_18_24 + n_age_25_44 + n_age_45_64 +
+      n_age_65_74 + n_age_75p + car_group + pt_group + female_share +
+      employed_share + income_group + hh_size
+  )
 )
-write.csv(overdisp_stats, file = file.path(dir_models, "poisson_overdispersion.csv"), row.names = FALSE)
 
-### Save model ANOVA (NegBin)
-anova_nb <- broom::tidy(anova(mc_m_nb, test = "Chisq"))
-write.csv(anova_nb, file = file.path(dir_models, "nb_model_anova.csv"), row.names = FALSE)
+fit_count_models <- function(model_name, model_formula, data) {
+  message("\n--- Fitting ", model_name, " model: ", deparse(model_formula), " ---")
+  
+  mean_trips <- mean(data$n_work)
+  var_trips <- var(data$n_work)
+  
+  model_poisson <- glm(model_formula, family = poisson(), data = data)
+  pearson_overdispersion <- sum(residuals(model_poisson, type = "pearson")^2) /
+    df.residual(model_poisson)
+  
+  model_negbin <- glm.nb(model_formula, data = data)
+  
+  comparison <- tibble(
+    model = c("Poisson", "NegBin"),
+    logLik = c(logLik(model_poisson), logLik(model_negbin)),
+    AIC = c(AIC(model_poisson), AIC(model_negbin))
+  )
+  
+  irr <- broom::tidy(model_negbin, exponentiate = TRUE, conf.int = TRUE)
+  anova_nb <- broom::tidy(anova(model_negbin, test = "Chisq"))
+  overdispersion_stats <- tibble(
+    model = model_name,
+    mean_trips = mean_trips,
+    var_trips = var_trips,
+    pearson_overdispersion = pearson_overdispersion
+  )
+  
+  cat("Mean =", round(mean_trips, 3), " Var =", round(var_trips, 3), "\n")
+  cat("Poisson Pearson overdispersion =", round(pearson_overdispersion, 2), "\n")
+  cat(
+    "NB theta =",
+    round(model_negbin$theta, 3),
+    "(higher ~ closer to Poisson; lower ~ more overdispersion)\n"
+  )
+  print(as.data.frame(dplyr::arrange(comparison, AIC)), row.names = FALSE)
+  print(anova_nb)
+  print(dplyr::select(irr, term, estimate, conf.low, conf.high, p.value))
+  
+  saveRDS(model_poisson, file = file.path(dir_models, paste0(model_name, "_poisson.rds")))
+  saveRDS(model_negbin, file = file.path(dir_models, paste0(model_name, "_negbin.rds")))
+  
+  write_csv(irr, file.path(dir_models, paste0(model_name, "_nb_model_IRRs.csv")))
+  write_csv(comparison, file.path(dir_models, paste0(model_name, "_model_comparison.csv")))
+  write_csv(overdispersion_stats, file.path(dir_models, paste0(model_name, "_poisson_overdispersion.csv")))
+  write_csv(anova_nb, file.path(dir_models, paste0(model_name, "_nb_model_anova.csv")))
+  
+  list(
+    poisson = model_poisson,
+    negbin = model_negbin,
+    comparison = comparison,
+    irr = irr,
+    overdispersion = overdispersion_stats,
+    anova = anova_nb
+  )
+}
 
+model_results <- purrr::imap(model_specs, ~ fit_count_models(.y, .x$formula, df_work_model_input))
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ### Step 6: Apply your model to the Region
 
