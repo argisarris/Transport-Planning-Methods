@@ -178,18 +178,18 @@ df_cleaned <- df_cleaned %>%
 df_cleaned <- df_cleaned %>%
   dplyr::select(-dplyr::any_of(c("AMSTAT", "f40120", "f42100e", "f20601")))
 
-# ---- Drop rows with missing values
-n_before_na <- nrow(df_cleaned)
-df_cleaned <- df_cleaned %>% drop_na()
-n_after_na <- nrow(df_cleaned)
-cat("🚫 Dropped due to NA values: ", n_before_na - n_after_na, "\n")
-
 # ---- Drop rows with invalid or unmapped trip purposes
 n_before_purpose <- nrow(df_cleaned)
 df_cleaned <- df_cleaned %>% filter(!is.na(purpose))
 n_after_purpose <- nrow(df_cleaned)
 cat("🚫 Dropped due to invalid/missing trip purpose: ", 
     n_before_purpose - n_after_purpose, "\n")
+
+# ---- Drop rows with missing values
+n_before_na <- nrow(df_cleaned)
+df_cleaned <- df_cleaned %>% drop_na()
+n_after_na <- nrow(df_cleaned)
+cat("🚫 Dropped due to NA values: ", n_before_na - n_after_na, "\n")
 
 # ---- Plot: Weighted total trips by purpose
 trip_summary <- df_cleaned %>%
@@ -497,6 +497,11 @@ model_specs <- list(
     formula = n_work ~ n_age_0_17 + n_age_18_24 + n_age_25_44 + n_age_45_64 +
       n_age_65_74 + n_age_75p + car_group + pt_group
   ),
+  relevant = list(
+    description = "Age + car/PT availability + employment share",
+    formula = n_work ~ n_age_0_17 + n_age_18_24 + n_age_25_44 + n_age_45_64 +
+      n_age_65_74 + n_age_75p + car_group + pt_group + employed_share
+  ),
   full = list(
     description = "Age + car/PT availability + gender, employment, income",
     formula = n_work ~ n_age_0_17 + n_age_18_24 + n_age_25_44 + n_age_45_64 +
@@ -566,7 +571,7 @@ model_results <- purrr::imap(model_specs, ~ fit_count_models(.y, .x$formula, df_
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ### Step 6: Apply your model to the Region
 
-basic_work_model <- model_results$basic$negbin
+relevant_work_model <- model_results$relevant$negbin
 
 # Helper lookups for the age brackets and access categories available in the
 # structural data. Each "ANZPERSONEN(R_<age code>_<access code>)" column holds the
@@ -581,6 +586,24 @@ age_brackets <- c(
   n_age_75p  = "R_75XX"
 )
 
+employment_brackets <- c(
+  n_age_0_17 = "RE_0017",
+  n_age_18_24 = "RE_1824",
+  n_age_25_44 = "RE_2544",
+  n_age_45_64 = "RE_4564",
+  n_age_65_74 = "RE_6574",
+  n_age_75p  = "RE_75XX"
+)
+
+age_labels <- c(
+  n_age_0_17 = "0–17",
+  n_age_18_24 = "18–24",
+  n_age_25_44 = "25–44",
+  n_age_45_64 = "45–64",
+  n_age_65_74 = "65–74",
+  n_age_75p  = "75+"
+)
+
 access_configurations <- tibble::tribble(
   ~car_group,     ~pt_group,     ~suffix,
   "Available",    "Available",   "CARTC",
@@ -588,6 +611,44 @@ access_configurations <- tibble::tribble(
   "Unavailable",  "Available",   "NOCTC",
   "Unavailable",  "Unavailable", "NOCNOTC"
 )
+
+employment_columns <- access_configurations %>%
+  dplyr::mutate(
+    cols = purrr::map(
+      suffix,
+      ~ sprintf("ANZPERSONEN(%s_%s)", employment_brackets, .x)
+    )
+  )
+
+employment_lookup <- stats::setNames(employment_columns$cols, employment_columns$suffix)
+
+missing_employment_cols <- employment_columns %>%
+  dplyr::pull(cols) %>%
+  unlist() %>%
+  setdiff(names(Strukturdaten))
+
+if (length(missing_employment_cols) > 0) {
+  stop("Missing expected employment columns: ", paste(missing_employment_cols, collapse = ", "))
+}
+
+safe_row_sum <- function(data, columns, context_label) {
+  if (length(columns) == 0) {
+    return(rep(0, nrow(data)))
+  }
+  
+  missing <- setdiff(columns, names(data))
+  if (length(missing) > 0) {
+    stop(
+      sprintf(
+        "Missing expected structural columns for %s: %s",
+        context_label,
+        paste(missing, collapse = ", ")
+      )
+    )
+  }
+  
+  rowSums(as.matrix(data[, columns, drop = FALSE]), na.rm = TRUE)
+}
 
 # Build one prediction record per zone × access configuration. Each record keeps
 # the car/PT factors along with the proportional age composition derived from
@@ -620,11 +681,26 @@ predict_components <- purrr::map_dfr(
           return(NULL)
         }
         
+        employment_cols <- employment_lookup[[suffix]]
+        if (is.null(employment_cols)) {
+          stop("Missing employment lookup for suffix: ", suffix)
+        }
+        employment_counts <- purrr::map_dbl(
+          employment_cols,
+          ~ {
+            value <- zone_row[[.x]]
+            if (is.null(value) || is.na(value)) 0 else as.numeric(value)
+          }
+        )
+        employed_total <- sum(employment_counts, na.rm = TRUE)
+        employed_share <- if (total_people > 0) employed_total / total_people else NA_real_
+        
         tibble::tibble(
           zone_index = row_id,
           car_group = factor(car_group, levels = c("Unavailable", "Available")),
           pt_group = factor(pt_group, levels = c("Unavailable", "Available")),
-          weight = total_people
+          weight = total_people,
+          employed_share = employed_share
         ) %>%
           dplyr::bind_cols(stats::setNames(as.list(age_counts), names(age_brackets)))
       })
@@ -635,12 +711,13 @@ if (nrow(predict_components) == 0) {
   stop("Structural data did not yield any records for prediction.")
 }
 
-# Convert age counts to per-person proportions so that the basic household model
+# Convert age counts to per-person proportions so that the relevant household model
 # receives inputs on the same scale as it was trained. Predictions are then
 # multiplied by the population weight per record.
 predict_data <- predict_components %>%
   dplyr::mutate(
-    dplyr::across(dplyr::all_of(names(age_brackets)), ~ .x / weight)
+    dplyr::across(dplyr::all_of(names(age_brackets)), ~ .x / weight),
+    employed_share = dplyr::coalesce(employed_share, 0)
   )
 
 # Optional diagnostics: aggregate the implied population totals per age group
@@ -655,9 +732,14 @@ cat("✅ Total people assigned to model by age group:\n")
 print(age_group_totals)
 
 prediction_matrix <- predict_data %>%
-  dplyr::select(dplyr::all_of(names(age_brackets)), car_group, pt_group)
+  dplyr::select(
+    dplyr::all_of(names(age_brackets)),
+    car_group,
+    pt_group,
+    employed_share
+  )
 
-predicted_rates <- predict(basic_work_model, newdata = prediction_matrix, type = "response")
+predicted_rates <- predict(relevant_work_model, newdata = prediction_matrix, type = "response")
 
 zone_predictions <- predict_data %>%
   dplyr::mutate(predicted_trips = predicted_rates * weight) %>%
@@ -666,9 +748,149 @@ zone_predictions <- predict_data %>%
 
 Strukturdaten$trips_work <- zone_predictions$trips_work[match(seq_len(nrow(Strukturdaten)), zone_predictions$zone_index)]
 
+
 # ---- Merge into spatial data
 npvm_zones_ZH$trips_work <- Strukturdaten$trips_work
 npvm_zones_ZH$attractor_work <- Strukturdaten$FTE
+
+# ---- Derive zonal totals for structural attributes used in mapping outputs
+population_age_cols <- character(length(age_brackets))
+
+for (i in seq_along(age_brackets)) {
+  age_name <- names(age_brackets)[[i]]
+  new_column <- sprintf("population_%s", age_name)
+  age_columns <- sprintf("ANZPERSONEN(%s_%s)", age_brackets[[i]], access_configurations$suffix)
+  
+  Strukturdaten[[new_column]] <- safe_row_sum(Strukturdaten, age_columns, new_column)
+  population_age_cols[[i]] <- new_column
+}
+
+names(population_age_cols) <- names(age_brackets)
+
+Strukturdaten$population_total <- safe_row_sum(
+  Strukturdaten,
+  population_age_cols,
+  "population_total"
+)
+
+employment_all_columns <- unique(unlist(employment_lookup))
+Strukturdaten$employment_total <- safe_row_sum(
+  Strukturdaten,
+  employment_all_columns,
+  "employment_total"
+)
+
+Strukturdaten$employment_share <- dplyr::if_else(
+  Strukturdaten$population_total > 0,
+  Strukturdaten$employment_total / Strukturdaten$population_total,
+  NA_real_
+)
+
+Strukturdaten$employment_share_pct <- Strukturdaten$employment_share * 100
+
+car_available_suffixes <- access_configurations %>%
+  dplyr::filter(car_group == "Available") %>%
+  dplyr::pull(suffix)
+
+car_unavailable_suffixes <- access_configurations %>%
+  dplyr::filter(car_group == "Unavailable") %>%
+  dplyr::pull(suffix)
+
+car_available_columns <- unlist(purrr::map(
+  car_available_suffixes,
+  ~ sprintf("ANZPERSONEN(%s_%s)", age_brackets, .x)
+))
+
+car_unavailable_columns <- unlist(purrr::map(
+  car_unavailable_suffixes,
+  ~ sprintf("ANZPERSONEN(%s_%s)", age_brackets, .x)
+))
+
+Strukturdaten$car_available_count <- safe_row_sum(
+  Strukturdaten,
+  car_available_columns,
+  "car_available_count"
+)
+
+Strukturdaten$car_unavailable_count <- safe_row_sum(
+  Strukturdaten,
+  car_unavailable_columns,
+  "car_unavailable_count"
+)
+
+Strukturdaten$car_available_pct <- dplyr::if_else(
+  Strukturdaten$population_total > 0,
+  100 * Strukturdaten$car_available_count / Strukturdaten$population_total,
+  NA_real_
+)
+
+Strukturdaten$car_unavailable_pct <- dplyr::if_else(
+  Strukturdaten$population_total > 0,
+  100 * Strukturdaten$car_unavailable_count / Strukturdaten$population_total,
+  NA_real_
+)
+
+pt_available_suffixes <- access_configurations %>%
+  dplyr::filter(pt_group == "Available") %>%
+  dplyr::pull(suffix)
+
+pt_unavailable_suffixes <- access_configurations %>%
+  dplyr::filter(pt_group == "Unavailable") %>%
+  dplyr::pull(suffix)
+
+pt_available_columns <- unlist(purrr::map(
+  pt_available_suffixes,
+  ~ sprintf("ANZPERSONEN(%s_%s)", age_brackets, .x)
+))
+
+pt_unavailable_columns <- unlist(purrr::map(
+  pt_unavailable_suffixes,
+  ~ sprintf("ANZPERSONEN(%s_%s)", age_brackets, .x)
+))
+
+Strukturdaten$pt_available_count <- safe_row_sum(
+  Strukturdaten,
+  pt_available_columns,
+  "pt_available_count"
+)
+
+Strukturdaten$pt_unavailable_count <- safe_row_sum(
+  Strukturdaten,
+  pt_unavailable_columns,
+  "pt_unavailable_count"
+)
+
+Strukturdaten$pt_available_pct <- dplyr::if_else(
+  Strukturdaten$population_total > 0,
+  100 * Strukturdaten$pt_available_count / Strukturdaten$population_total,
+  NA_real_
+)
+
+Strukturdaten$pt_unavailable_pct <- dplyr::if_else(
+  Strukturdaten$population_total > 0,
+  100 * Strukturdaten$pt_unavailable_count / Strukturdaten$population_total,
+  NA_real_
+)
+
+transfer_columns <- c(
+  "population_total",
+  unname(population_age_cols),
+  "employment_total",
+  "employment_share",
+  "employment_share_pct",
+  "car_available_count",
+  "car_unavailable_count",
+  "car_available_pct",
+  "car_unavailable_pct",
+  "pt_available_count",
+  "pt_unavailable_count",
+  "pt_available_pct",
+  "pt_unavailable_pct"
+)
+
+for (col_name in transfer_columns) {
+  npvm_zones_ZH[[col_name]] <- Strukturdaten[[col_name]]
+}
 
 # ------------------------------------------------------------------------------------------------------------------
 ### Step 6a: Visualize and Save Plots
@@ -676,17 +898,14 @@ npvm_zones_ZH$attractor_work <- Strukturdaten$FTE
 plot_population_surface <- function(data, column, title, fill_label) {
   ggplot(data = data) +
     geom_sf(aes(fill = !!rlang::sym(column))) +
-    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    scale_fill_gradient(low = "lightblue", high = "darkblue", na.value = "grey90") +
     labs(title = title, fill = fill_label)
 }
 
 # Maps: total population per age group
 age_population_columns <- purrr::set_names(
-  population_age_cols,
-  sprintf(
-    "Age %s",
-    age_labels[stringr::str_replace(population_age_cols, "population_", "n_")]
-  )
+  unname(population_age_cols),
+  sprintf("Age %s", age_labels[names(population_age_cols)])
 )
 
 purrr::iwalk(age_population_columns, function(column, label) {
@@ -711,6 +930,22 @@ population_total_plot <- plot_population_surface(
 ggsave(
   file.path(dir_figures, "population_total.png"),
   plot = population_total_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# Map: employment share
+employment_share_plot <- plot_population_surface(
+  npvm_zones_ZH,
+  "employment_share_pct",
+  "Employment Share – Employed Residents",
+  "% employed"
+)
+
+ggsave(
+  file.path(dir_figures, "employment_share.png"),
+  plot = employment_share_plot,
   width = 8,
   height = 6,
   dpi = 300
