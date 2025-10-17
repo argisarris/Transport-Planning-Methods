@@ -18,7 +18,7 @@ library(broom)
 library(readxl)
 
 # ------------------------------------------------------------------------------------------------------------------
-# Step 0: Define base paths
+# Define base paths
 
 base_dir <- "C:/Users/ETH/ETH Zurich/Transport Planning Methods - Documents/03 Data/Materials for Trip Generation-20251008"
 
@@ -58,30 +58,30 @@ trip_cols_relevant <- c("HHNR", "wzweck1")
 
 df_tripsCH_reduced <- df_tripsCH %>%
   dplyr::select(dplyr::any_of(trip_cols_relevant)) %>%
-  standardise_hh_id() %>%
+  dplyr::rename(hh_id = HHNR) %>%
   dplyr::relocate(hh_id)
 
 # Person-level descriptors requested by the user.
 person_cols_relevant <- c(
-  "HHNR",                   # alternative household identifier name
-  "WP",                  # person weight
-  "alter",                  # age
-  "gesl",               # gender
-  "f40800_01",           # employment status
-  "f40120",            # highest education
-  "f42100e", # car availability
-  "f41600_01a",    # GA subscription
-  "f41600_01b",  # half-fare subscription
-  "f41600_01c",  # zone subscription
-  "f41600_01d", # route subscription
-  "f41600_01e", # seven25/track7 subscription
-  "f41600_01f",         # junior/child subscription
-  "f41600_01g"          # other subscription types
+  "HHNR",           # household identifier name
+  "WP",             # person weight
+  "alter",          # age
+  "gesl",           # gender
+  "AMSTAT",         # employment status
+  "f40120",         # highest education
+  "f42100e",        # car availability
+  "f41600_01a",     # GA subscription
+  "f41600_01b",     # half-fare subscription
+  "f41600_01c",     # zone subscription
+  "f41600_01d",     # route subscription
+  "f41600_01e",     # seven25/track7 subscription
+  "f41600_01f",     # junior/child subscription
+  "f41600_01g"      # other subscription types
 )
 
 df_persons_reduced <- df_persons %>%
   dplyr::select(dplyr::any_of(person_cols_relevant)) %>%
-  standardise_hh_id() %>%
+  dplyr::rename(hh_id = HHNR) %>%
   dplyr::relocate(hh_id)
 
 # Household-level information limited to the requested income attribute.
@@ -89,7 +89,7 @@ household_cols_relevant <- c("HHNR", "f20601")
 
 df_hh_reduced <- df_hh %>%
   dplyr::select(dplyr::any_of(household_cols_relevant)) %>%
-  standardise_hh_id() %>%
+  dplyr::rename(hh_id = HHNR) %>%
   dplyr::relocate(hh_id)
 
 # Join the trimmed tables on the harmonised household identifier to produce a
@@ -100,7 +100,7 @@ df_trips_persons_hh <- df_tripsCH_reduced %>%
 
 write_csv(
   df_trips_persons_hh,
-  file.path(dir_tables, "df_combined_reduced.csv")
+  file.path(dir_tables, "00_df_combined_relevant.csv")
 )
 
 # ------------------------------------------------------------------------------------------------------------------
@@ -127,8 +127,8 @@ df_cleaned <- df_trips_persons_hh %>%
     
     # Employment recode
     employment = case_when(
-      f40800_01 %in% c(1, 2, 3, 9) ~ "employed",
-      f40800_01 == 4 ~ "unemployed",
+      AMSTAT %in% c(2, 3) ~ "unemployed",
+      AMSTAT == 1 ~ "employed",
       TRUE ~ NA_character_
     ),
     
@@ -176,7 +176,7 @@ df_cleaned <- df_cleaned %>%
 
 # Drop raw columns already recoded
 df_cleaned <- df_cleaned %>%
-  dplyr::select(-dplyr::any_of(c("f40800_01", "f40120", "f42100e", "f20601")))
+  dplyr::select(-dplyr::any_of(c("AMSTAT", "f40120", "f42100e", "f20601")))
 
 # ---- Drop rows with missing values
 n_before_na <- nrow(df_cleaned)
@@ -220,7 +220,7 @@ ggsave(
 # ---- Final row count
 cat("✅ Final number of rows in cleaned dataset: ", nrow(df_cleaned), "\n")
 
-write_csv(df_cleaned, file.path(dir_tables, "df_cleaned_combined.csv"))
+write_csv(df_cleaned, file.path(dir_tables, "01_df_combined_cleaned.csv"))
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 ### Step 4: Prepare Work Trip Model Input ----
@@ -243,7 +243,7 @@ df_work_trips <- df_work_trips %>%
   left_join(df_work_counts, by = "hh_id")
 
 # Save full table with all attributes but only work trips
-write_csv(df_work_trips, file.path(dir_tables, "df_cleaned_worktrips.csv"))
+write_csv(df_work_trips, file.path(dir_tables, "02_df_worktrips.csv"))
 
 # --- PLOTS ---
 
@@ -279,10 +279,29 @@ p_emp <- sum_work_trips(df_work_trips, employment) %>%
   theme(legend.position = "none")
 
 # 4. Work trips by income group
+# Define the desired order of income groups
+income_levels <- c(
+  "Under CHF 2000",
+  "CHF 2000 to 4000",
+  "CHF 4001 to 6000",
+  "CHF 6001 to 8000",
+  "CHF 8001 to 10000",
+  "CHF 10001 to 12000",
+  "CHF 12001 to 14000",
+  "CHF 14001 to 16000",
+  "More than CHF 16000"
+)
+
+# Plot: Total Work Trips by Income Group (weighted)
 p_income <- sum_work_trips(df_work_trips, income_group) %>%
-  ggplot(aes(x = reorder(income_group, total_work_trips), y = total_work_trips, fill = income_group)) +
+  mutate(income_group = factor(income_group, levels = income_levels)) %>%  # enforce custom order
+  ggplot(aes(x = income_group, y = total_work_trips, fill = income_group)) +
   geom_col() +
-  labs(title = "Total Work Trips by Income Group", x = "Income Group", y = "Weighted Work Trips") +
+  labs(
+    title = "Total Work Trips by Income Group",
+    x = "Income Group",
+    y = "Weighted Work Trips"
+  ) +
   coord_flip() +
   theme_minimal() +
   theme(legend.position = "none")
@@ -468,7 +487,7 @@ df_work_model_input <- df_household_predictors %>%
 
 cat("✅ Households available for modelling:", nrow(df_work_model_input), "\n")
 
-write_csv(df_work_model_input, file.path(dir_tables, "df_work_model_input.csv"))
+write_csv(df_work_model_input, file.path(dir_tables, "03_df_work_model_input.csv"))
 
 # ---- Define model specifications
 
@@ -653,6 +672,83 @@ npvm_zones_ZH$attractor_work <- Strukturdaten$FTE
 
 # ------------------------------------------------------------------------------------------------------------------
 ### Step 6a: Visualize and Save Plots
+# Helper to generate and save sf plots using the employment attractor colour palette
+plot_population_surface <- function(data, column, title, fill_label) {
+  ggplot(data = data) +
+    geom_sf(aes(fill = !!rlang::sym(column))) +
+    scale_fill_gradient(low = "lightblue", high = "darkblue") +
+    labs(title = title, fill = fill_label)
+}
+
+# Maps: total population per age group
+age_population_columns <- purrr::set_names(
+  population_age_cols,
+  sprintf(
+    "Age %s",
+    age_labels[stringr::str_replace(population_age_cols, "population_", "n_")]
+  )
+)
+
+purrr::iwalk(age_population_columns, function(column, label) {
+  plot_title <- sprintf("Population per Zone – %s", label)
+  plot <- plot_population_surface(npvm_zones_ZH, column, plot_title, "People")
+  output_filename <- sprintf(
+    "population_%s.png",
+    stringr::str_replace_all(stringr::str_to_lower(label), "[^0-9a-z]+", "_")
+  )
+  output_path <- file.path(dir_figures, output_filename)
+  ggsave(output_path, plot = plot, width = 8, height = 6, dpi = 300)
+})
+
+# Map: total population per zone
+population_total_plot <- plot_population_surface(
+  npvm_zones_ZH,
+  "population_total",
+  "Population per Zone – Total",
+  "People"
+)
+
+ggsave(
+  file.path(dir_figures, "population_total.png"),
+  plot = population_total_plot,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# Maps: car availability as share of zonal population
+car_share_columns <- c(
+  "Car available" = "car_available_pct",
+  "Car unavailable" = "car_unavailable_pct"
+)
+
+purrr::iwalk(car_share_columns, function(column, label) {
+  plot_title <- sprintf("%s – Share of Zone Population", label)
+  plot <- plot_population_surface(npvm_zones_ZH, column, plot_title, "% of population")
+  output_filename <- sprintf(
+    "population_share_%s.png",
+    stringr::str_replace_all(stringr::str_to_lower(label), "[^0-9a-z]+", "_")
+  )
+  output_path <- file.path(dir_figures, output_filename)
+  ggsave(output_path, plot = plot, width = 8, height = 6, dpi = 300)
+})
+
+# Maps: PT availability as share of zonal population
+pt_share_columns <- c(
+  "PT available" = "pt_available_pct",
+  "PT unavailable" = "pt_unavailable_pct"
+)
+
+purrr::iwalk(pt_share_columns, function(column, label) {
+  plot_title <- sprintf("%s – Share of Zone Population", label)
+  plot <- plot_population_surface(npvm_zones_ZH, column, plot_title, "% of population")
+  output_filename <- sprintf(
+    "population_share_%s.png",
+    stringr::str_replace_all(stringr::str_to_lower(label), "[^0-9a-z]+", "_")
+  )
+  output_path <- file.path(dir_figures, output_filename)
+  ggsave(output_path, plot = plot, width = 8, height = 6, dpi = 300)
+})
 
 # Plot 1: Work trip production
 p1 <- ggplot() +
