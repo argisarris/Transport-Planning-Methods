@@ -47,3 +47,29 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Project-specific large data files and outputs
+Task_2.1/Data/
+Task_2.1/Output/
+Task_2.1/03_Structural/
+
+Task_2.2/Data/
+Task_2.2/Output/
+
+Task_2.3/Data/
+Task_2.3/Output/
+Task_2.3/Figures/
+
+# Old files (removed from project root)
+.RDataTmp
+03_Structural/
+2_1_Trip Generation_GroupA_v4.R
+
+# Documentation files (will be replaced with general summary)
+Task_2.3/README_Task2.3.md
+Task_2.3/README_Figures.md
+Task_2.3/QUICK_START_GUIDE.md
+Task_2.3/PRE_RUN_CHECKLIST.md
+Task_2.3/SOCIODEMOGRAPHIC_DATA_GUIDE.md
+Task_2.3/UPDATES_SUMMARY.md
+Task_2.3/BUG_FIX_APOLLO.md
